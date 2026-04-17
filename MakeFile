@@ -1,0 +1,10 @@
+Target=crptz
+
+all: ${Target}
+
+${Target}: main.o crptzip.o
+	gcc $^ -o $@
+%.o: %.c
+	gcc -c $^
+clean:
+	rm main.o crptzip.o ${Target}

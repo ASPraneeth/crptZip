@@ -1,0 +1,876 @@
+================================================================================
+                    CS1234 — OPTIONAL PROJECT SPECIFICATION
+                    CrptZip — Secure Folder Archiver
+================================================================================
+
+STUDENT   : ___________________________
+DEMO DATE : April 22 (Lab L13)
+MARKS     : 10
+APPROVED  : Yes
+
+--------------------------------------------------------------------------------
+1. WHAT IS THIS PROJECT?
+--------------------------------------------------------------------------------
+
+CrptZip is a command-line tool that:
+
+  (a) Takes multiple files
+  (b) Optionally compresses them (RLE with size check)
+  (c) Encrypts them using a password (XOR + bitwise)
+  (d) Packs them all into ONE .crptz archive file
+  (e) Can extract, list, and delete files from the archive
+
+Think of it as a simple version of ZIP + password protection, built from scratch.
+
+  LOCKING (creating archive):
+  ───────────────────────────
+  file1.txt + file2.txt + file3.txt  →  archive.crptz 🔐
+
+  EXTRACTING (restoring files):
+  ──────────────────────────────
+  archive.crptz + password  →  file1.txt, file2.txt, file3.txt ✅
+
+
+--------------------------------------------------------------------------------
+2. TERMINAL USAGE
+--------------------------------------------------------------------------------
+
+  $ ./crptzip add     archive.crptz password file1.txt file2.txt file3.txt
+  $ ./crptzip extract archive.crptz password output_folder/
+  $ ./crptzip extract archive.crptz password output_folder/ file1.txt
+  $ ./crptzip list    archive.crptz
+  $ ./crptzip delete  archive.crptz password file2.txt
+  $ ./crptzip inspect archive.crptz
+
+
+--------------------------------------------------------------------------------
+3. FILE STRUCTURE
+--------------------------------------------------------------------------------
+
+  crptzip_project/
+  ├── crptzip.h         → All structs + all function declarations
+  ├── crptzip.c         → All function implementations
+  ├── main.c            → Driver program (command-line interface)
+  ├── Makefile          → Build rules
+  └── test_files/
+      ├── file1.txt           → Test input 1
+      ├── file2.txt           → Test input 2
+      ├── file3.txt           → Test input 3
+      ├── archive.crptz       → Created archive
+      └── output/             → Folder for extracted files
+
+
+--------------------------------------------------------------------------------
+4. .crptz ARCHIVE FILE FORMAT
+--------------------------------------------------------------------------------
+
+  Your archive file must follow this exact binary structure:
+
+  ┌──────────────────────────────────────────────────────┐
+  │                 GLOBAL HEADER (32 bytes)             │
+  │  Magic bytes  : "CRPTZ"    (5 bytes)                 │
+  │  Version      : 1 byte     (= 1)                     │
+  │  Num files    : 4 bytes    (how many files inside)   │
+  │  Checksum     : 4 bytes    (XOR fingerprint of data) │
+  │  Reserved     : 18 bytes   (zeros, for future use)   │
+  ├──────────────────────────────────────────────────────┤
+  │                 FILE ENTRY 1                         │
+  │  Filename length  : 2 bytes                          │
+  │  Filename         : n bytes                          │
+  │  Original size    : 8 bytes                          │
+  │  Compressed size  : 8 bytes                          │
+  │  Is compressed    : 1 byte  (1 = yes, 0 = no)        │
+  │  Encrypted data   : compressed_size bytes            │
+  ├──────────────────────────────────────────────────────┤
+  │                 FILE ENTRY 2                         │
+  │  ... same structure ...                              │
+  ├──────────────────────────────────────────────────────┤
+  │                 FILE ENTRY n                         │
+  │  ... same structure ...                              │
+  └──────────────────────────────────────────────────────┘
+
+
+--------------------------------------------------------------------------------
+5. DATA STRUCTURES  (define all in crptzip.h)
+--------------------------------------------------------------------------------
+
+(a) FileNode — one node in the SLL of input files
+    ──────────────────────────────────────────────
+    struct FileNode {
+        char             filename[256];    // name of the file
+        long             original_size;    // size before compression
+        long             compressed_size;  // size after RLE
+        int              is_compressed;    // 1 if RLE helped, 0 if not
+        unsigned char*   data;             // file content (malloc'd)
+        struct FileNode* next;
+    };
+
+(b) IndexNode — one node in the DLL archive index
+    ──────────────────────────────────────────────
+    struct IndexNode {
+        char              filename[256];
+        long              original_size;
+        long              compressed_size;
+        int               is_compressed;
+        long              offset;          // byte position inside .crptz
+        struct IndexNode* prev;
+        struct IndexNode* next;
+    };
+
+(c) ArchiveHeader — global header of the .crptz file
+    ──────────────────────────────────────────────────
+    struct ArchiveHeader {
+        char         magic[6];      // "CRPTZ\0"
+        unsigned char version;      // = 1
+        int          num_files;     // number of files in archive
+        unsigned int checksum;      // XOR checksum of all encrypted data
+    };
+
+
+--------------------------------------------------------------------------------
+6. FUNCTIONS TO IMPLEMENT
+--------------------------------------------------------------------------------
+
+================  SECTION A : FILE READING (Singly Linked List)  ===============
+
+  A1. FileNode* create_file_node(const char* filename)
+      ──────────────────────────────────────────────────
+      WHAT : Open the file. Read all its contents into a malloc'd buffer.
+             Store filename and original_size. Set next = NULL.
+      TEST : Print filename and size. Should match actual file size.
+
+  A2. void sll_append(FileNode** head, FileNode* node)
+      ──────────────────────────────────────────────────
+      WHAT : Add a FileNode to the END of the SLL.
+      TEST : Append 3 nodes. Print all 3 filenames in order.
+
+  A3. FileNode* sll_find(FileNode* head, const char* filename)
+      ───────────────────────────────────────────────────────────
+      WHAT : Search SLL for a file by name. Return it or NULL.
+      TEST : Find a file that exists. Find one that doesn't.
+
+  A4. int sll_remove(FileNode** head, const char* filename)
+      ───────────────────────────────────────────────────────
+      WHAT : Remove a FileNode by filename. Free its memory.
+             Return 1 if found and removed, 0 if not found.
+      TEST : Remove middle node. Check list is still connected.
+
+  A5. void sll_free(FileNode* head)
+      ──────────────────────────────
+      WHAT : Free all FileNodes and their data buffers.
+
+
+================  SECTION B : ARCHIVE INDEX (Doubly Linked List)  ==============
+
+  B1. IndexNode* create_index_node(const char* filename,
+                                   long orig, long comp,
+                                   int is_comp, long offset)
+      ─────────────────────────────────────────────────────
+      WHAT : Allocate a new IndexNode with given metadata.
+
+  B2. void dll_append(IndexNode** head, IndexNode* node)
+      ──────────────────────────────────────────────────
+      WHAT : Add IndexNode to END of DLL. Set prev/next correctly.
+      TEST : Append 3 nodes. Traverse FORWARD then BACKWARD.
+
+  B3. IndexNode* dll_find(IndexNode* head, const char* filename)
+      ────────────────────────────────────────────────────────────
+      WHAT : Search DLL for a file entry by name.
+
+  B4. int dll_remove(IndexNode** head, const char* filename)
+      ───────────────────────────────────────────────────────
+      WHAT : Remove an IndexNode by filename. Fix prev/next links.
+             Return 1 if removed, 0 if not found.
+      TEST : Remove middle node. Both neighbors must still link correctly.
+
+  B5. void dll_print(IndexNode* head)
+      ──────────────────────────────────
+      WHAT : Print a formatted table of all files in archive.
+
+      FORMAT:
+      ┌──────────────────┬─────────────┬─────────────┬────────────┬──────────┐
+      │ Filename         │ Orig Size   │ Stored Size │ Ratio      │ Compress │
+      ├──────────────────┼─────────────┼─────────────┼────────────┼──────────┤
+      │ file1.txt        │ 5000 bytes  │ 3200 bytes  │ 36% saved  │ Yes      │
+      │ file2.txt        │ 3000 bytes  │ 3000 bytes  │ 0%         │ No       │
+      └──────────────────┴─────────────┴─────────────┴────────────┴──────────┘
+      Total: 2 files | 8000 bytes original | 6200 bytes stored
+
+  B6. void dll_free(IndexNode* head)
+      ──────────────────────────────────
+      WHAT : Free all IndexNodes.
+
+
+================  SECTION C : RLE COMPRESSION  =================================
+
+  C1. unsigned char* rle_compress(const unsigned char* data,
+                                  long original_size,
+                                  long* compressed_size)
+      ────────────────────────────────────────────────────
+      WHAT : Compress data using Run-Length Encoding.
+             Count consecutive identical bytes.
+             If count > 1 : write '#', count, byte
+             If count = 1 : write byte directly
+             '#' is the marker byte to avoid ambiguity.
+
+      EXAMPLE:
+             Input  : "aaabbbcd"     (8 bytes)
+             Output : "#3a#3bcd"     (8 bytes — same here)
+
+             Input  : "aaaaaaaabc"   (10 bytes)
+             Output : "#8abc"        (5 bytes) ✅ smaller
+
+      TEST : Compress then decompress. Result MUST match original exactly.
+
+  C2. unsigned char* rle_decompress(const unsigned char* data,
+                                    long compressed_size,
+                                    long original_size)
+      ──────────────────────────────────────────────────────
+      WHAT : Reverse of rle_compress.
+             If byte == '#' : read count, read byte, repeat it count times
+             Otherwise      : copy byte directly.
+      TEST : "3a3bcd" → "aaabbbcd"
+
+  C3. int should_compress(long original_size, long compressed_size)
+      ─────────────────────────────────────────────────────────────
+      WHAT : Return 1 if compressed_size < original_size.
+             Return 0 otherwise (don't use compression — store original).
+      WHY  : RLE can make files BIGGER for random text.
+             This check ensures we NEVER store a bigger version.
+
+
+================  SECTION D : ENCRYPTION (Bitwise — Core Feature)  ============
+
+  D1. void encrypt_data(unsigned char* data, long size,
+                        const char* password)
+      ──────────────────────────────────────────────────
+      WHAT : Encrypt data IN-PLACE using two bitwise steps per byte:
+
+             Step 1 — XOR with password byte (cycles through password):
+                      xored = data[i] ^ password[i % password_len]
+
+             Step 2 — Rotate left by 2 bits:
+                      rotated = (xored << 2) | (xored >> 6)
+
+             data[i] = rotated
+
+      EXAMPLE:
+             'H' (01001000) XOR 'k' (01101011) = 00100011
+             Rotate left 2 = 10001100  ← stored in file
+
+      TEST : encrypt then decrypt. Must get original back exactly.
+      USES : Bitwise operators ^  <<  >>
+
+  D2. void decrypt_data(unsigned char* data, long size,
+                        const char* password)
+      ──────────────────────────────────────────────────
+      WHAT : Reverse of encrypt_data.
+
+             Step 1 — Rotate RIGHT by 2 bits (undo left rotation):
+                      unrotated = (data[i] >> 2) | (data[i] << 6)
+
+             Step 2 — XOR with same password (XOR is its own inverse):
+                      data[i] = unrotated ^ password[i % password_len]
+
+      TEST : wrong password → garbage output ❌
+             correct password → original data ✅
+      USES : Bitwise operators ^  <<  >>
+
+  D3. unsigned int hash_password(const char* password)
+      ──────────────────────────────────────────────────
+      WHAT : Convert password into a single number (hash).
+             Used to verify correct password during extraction.
+
+             Use djb2 algorithm (you used this in Mini Search Engine!):
+             hash = 5381
+             for each character c:
+                 hash = ((hash << 5) + hash) + c
+
+      RETURN : unsigned int hash value
+      USES   : Bitwise <<
+
+  D4. int validate_password(const char* password)
+      ──────────────────────────────────────────────
+      WHAT : Check password meets requirements:
+             → At least 6 characters long
+             → At least one digit (0-9)
+             → At least one uppercase letter (A-Z)
+             Return 1 if valid, 0 if invalid.
+      TEST : "abc"    → invalid (too short, no digit, no uppercase)
+             "Abc123" → valid ✅
+
+
+================  SECTION E : CHECKSUM (Bitwise)  ==============================
+
+  E1. unsigned int compute_checksum(const unsigned char* data, long size)
+      ─────────────────────────────────────────────────────────────────────
+      WHAT : Generate a fingerprint of data using XOR chaining.
+             If even ONE byte changes → fingerprint changes.
+
+             checksum = 0
+             for each byte b:
+                 checksum = checksum ^ b
+                 checksum = (checksum << 1) | (checksum >> 31)
+
+      RETURN : unsigned int checksum
+      USES   : Bitwise ^  <<  >>
+
+  E2. int verify_checksum(const unsigned char* data, long size,
+                          unsigned int expected)
+      ─────────────────────────────────────────────────────────
+      WHAT : Recompute checksum and compare with expected.
+             Return 1 if match (intact), 0 if mismatch (corrupted).
+      TEST : Flip one byte manually → should return 0 ❌
+
+
+================  SECTION F : ARCHIVE OPERATIONS  ==============================
+
+  F1. int add_files(const char* archive_path,
+                    const char* password,
+                    char* filenames[],
+                    int num_files)
+      ─────────────────────────────────────────────
+      WHAT : Full archive creation pipeline.
+
+      STEPS:
+        1. Validate password                          (D4)
+        2. Hash password and store in header          (D3)
+        3. For each file:
+             a. create_file_node() — load file        (A1)
+             b. rle_compress() — try to compress      (C1)
+             c. should_compress() — keep if smaller   (C3)
+             d. encrypt_data() — encrypt              (D1)
+             e. sll_append() — add to file list       (A2)
+        4. compute_checksum() of all encrypted data  (E1)
+        5. Write ArchiveHeader to .crptz file
+        6. For each FileNode:
+             a. Write file entry to archive
+             b. create_index_node() + dll_append()    (B1, B2)
+        7. Print summary
+        8. Free SLL and DLL
+
+      PRINT:
+        "Added 3 files to archive.crptz"
+        "file1.txt : 5000 bytes → 2400 bytes (compressed)"
+        "file2.txt : 3000 bytes → 3000 bytes (stored as-is)"
+        "Total     : 8000 bytes → 5400 bytes"
+
+  F2. int extract_files(const char* archive_path,
+                        const char* password,
+                        const char* output_folder,
+                        const char* specific_file)
+      ──────────────────────────────────────────────
+      WHAT : Extract files from archive.
+             If specific_file is NULL → extract ALL files.
+             If specific_file is given → extract ONLY that file.
+             (This is the "selective extraction" feature.)
+
+      STEPS:
+        1. Read and validate ArchiveHeader
+        2. Verify magic == "CRPTZ"
+        3. Hash given password and compare with stored hash
+           If mismatch → print "Wrong password" and exit
+        4. For each file entry:
+             a. Read encrypted data
+             b. verify_checksum()                     (E2)
+             c. decrypt_data()                        (D2)
+             d. If is_compressed: rle_decompress()    (C2)
+             e. Write to output_folder/filename
+        5. Print extraction summary
+
+      PRINT:
+        "Extracted file1.txt (5000 bytes) ✅"
+        "Extracted file2.txt (3000 bytes) ✅"
+
+  F3. void list_archive(const char* archive_path)
+      ──────────────────────────────────────────────
+      WHAT : Read archive headers ONLY (no password needed, no decryption).
+             Build DLL index. Print formatted table using dll_print().
+      NOTE : Password is NOT required for listing.
+
+  F4. int delete_file(const char* archive_path,
+                      const char* password,
+                      const char* filename)
+      ───────────────────────────────────────────
+      WHAT : Remove one file from the archive.
+
+      STEPS:
+        1. Read entire archive into memory
+        2. Verify password hash
+        3. Find the file entry using dll_find()        (B3)
+        4. dll_remove() from index                    (B4)
+        5. Rewrite the entire archive WITHOUT that file
+           (This is the "archive repacking" feature)
+        6. Print confirmation
+
+      PRINT:
+        "Deleted file2.txt from archive.crptz"
+        "Archive repacked: 3 files → 2 files"
+
+  F5. void inspect_archive(const char* archive_path)
+      ──────────────────────────────────────────────
+      WHAT : Show detailed statistics of the archive.
+
+      PRINT:
+        "========== Archive Inspection =========="
+        "Archive    : archive.crptz"
+        "Files      : 3"
+        "Total orig : 15000 bytes"
+        "Total stored: 9200 bytes"
+        "Space saved : 38%"
+        "Compressed files : 2 / 3"
+        "========================================"
+
+
+================  SECTION G : DRIVER PROGRAM (main.c)  ========================
+
+  G1. int main(int argc, char* argv[])
+      ────────────────────────────────
+      WHAT : Parse command-line arguments and call correct function.
+
+      COMMANDS:
+        add     → call add_files()
+        extract → call extract_files()
+        list    → call list_archive()
+        delete  → call delete_file()
+        inspect → call inspect_archive()
+
+      ON WRONG USAGE:
+        "Usage:"
+        "  ./crptzip add     <archive> <password> <file1> [file2...]"
+        "  ./crptzip extract <archive> <password> <output/> [filename]"
+        "  ./crptzip list    <archive>"
+        "  ./crptzip delete  <archive> <password> <filename>"
+        "  ./crptzip inspect <archive>"
+
+
+--------------------------------------------------------------------------------
+7. ESTIMATED LINE COUNT
+--------------------------------------------------------------------------------
+
+  Section A  (SLL)              :  ~120 lines
+  Section B  (DLL)              :  ~150 lines
+  Section C  (RLE)              :  ~120 lines
+  Section D  (Encryption)       :  ~120 lines
+  Section E  (Checksum)         :  ~60  lines
+  Section F  (Archive ops)      :  ~250 lines
+  Section G  (main.c)           :  ~100 lines
+  crptzip.h  (structs+declares) :  ~60  lines
+  ──────────────────────────────────────────────
+  TOTAL                         :  ~980 lines ✅
+
+
+--------------------------------------------------------------------------------
+8. MAKEFILE
+--------------------------------------------------------------------------------
+
+  CC     = gcc
+  CFLAGS = -Wall -Wextra -g
+
+  all: crptzip
+
+  crptzip: main.o crptzip.o
+          $(CC) $(CFLAGS) -o crptzip main.o crptzip.o
+
+  main.o: main.c crptzip.h
+          $(CC) $(CFLAGS) -c main.c
+
+  crptzip.o: crptzip.c crptzip.h
+          $(CC) $(CFLAGS) -c crptzip.c
+
+  clean:
+          rm -f *.o crptzip
+
+
+--------------------------------------------------------------------------------
+9. TESTING CHECKLIST
+--------------------------------------------------------------------------------
+
+  [ ] add 3 files → archive.crptz created
+  [ ] list shows correct table of all 3 files (no password needed)
+  [ ] extract all → all 3 files restored exactly
+        diff file1.txt output/file1.txt  → NO DIFFERENCE
+  [ ] extract single file works correctly
+  [ ] delete one file → archive has 2 files left
+  [ ] inspect shows correct stats
+  [ ] wrong password → "Wrong password" message, no crash
+  [ ] invalid password (too short) → rejected at add time
+  [ ] RLE correctly stores original when compression makes it bigger
+  [ ] corrupt one byte in .crptz manually → checksum catches it
+  [ ] empty file handled gracefully
+  [ ] large file (>10,000 bytes) works correctly
+  [ ] make clean → make builds from scratch with zero errors
+  [ ] valgrind shows zero memory leaks
+
+
+--------------------------------------------------------------------------------
+10. DEMO SCRIPT (April 22)
+--------------------------------------------------------------------------------
+
+  Step 1 → Show 3 input files (readable text)
+           $ cat file1.txt
+
+  Step 2 → Add them to archive
+           $ ./crptzip add archive.crptz Abc123 file1.txt file2.txt file3.txt
+
+  Step 3 → Show archive is unreadable
+           $ xxd archive.crptz | head     ← pure gibberish 🔐
+
+  Step 4 → List files (no password!)
+           $ ./crptzip list archive.crptz
+
+  Step 5 → Inspect archive stats
+           $ ./crptzip inspect archive.crptz
+
+  Step 6 → Extract all files
+           $ ./crptzip extract archive.crptz Abc123 output/
+
+  Step 7 → Prove files are identical
+           $ diff file1.txt output/file1.txt   ← no output = identical ✅
+
+  Step 8 → Delete one file from archive
+           $ ./crptzip delete archive.crptz Abc123 file2.txt
+           $ ./crptzip list archive.crptz       ← only 2 files now
+
+  Step 9 → Try wrong password
+           $ ./crptzip extract archive.crptz wrongpass output/
+           "Wrong password ❌"
+
+  Step 10 → Corrupt archive + verify checksum catches it
+            (flip one byte manually, then try to extract)
+            "Archive corrupted ❌"
+
+
+--------------------------------------------------------------------------------
+11. GRADING RUBRIC (10 marks)
+--------------------------------------------------------------------------------
+
+  add + extract works correctly           : 3 marks
+  Encryption makes file unreadable        : 2 marks
+  list + delete + inspect work            : 2 marks
+  Code quality (structure, comments)      : 2 marks
+  Demo explanation + Q&A                  : 1 mark
+
+  Bonus:
+    Zero memory leaks (valgrind)          : +0.5
+    Compression ratio printed accurately  : +0.5
+
+
+================================================================================
+                         STEPS TO FOLLOW
+================================================================================
+
+--------------------------------------------------------------------------------
+PHASE 1 — SETUP  (Day 1 — Today)
+--------------------------------------------------------------------------------
+
+  GOAL: Empty project that compiles cleanly.
+
+  1. Create project folder:
+       mkdir crptzip_project
+       cd crptzip_project
+       touch crptzip.h crptzip.c main.c Makefile
+
+  2. Write Makefile (copy from Section 8 above)
+
+  3. In crptzip.h — write your 3 structs:
+       → FileNode
+       → IndexNode
+       → ArchiveHeader
+
+  4. In crptzip.h — write empty function declarations
+     (just the signatures, no body yet)
+
+  5. In crptzip.c — write empty function bodies:
+       int add_files(...) { return 0; }
+       (just so it compiles)
+
+  6. Run: make
+     → Must compile with ZERO errors ✅
+
+  CHECKPOINT: "make" works. Nothing else yet. That's fine.
+
+--------------------------------------------------------------------------------
+PHASE 2 — SINGLY LINKED LIST  (Day 2)
+--------------------------------------------------------------------------------
+
+  GOAL: Load files into a linked list and print them.
+
+  7.  Implement create_file_node()
+      → Open file with fopen()
+      → Get size with fseek() + ftell()
+      → malloc() a buffer
+      → fread() entire file into buffer
+      → Close file
+
+  8.  Implement sll_append()
+      → Standard SLL tail insertion
+
+  9.  Implement sll_find()
+      → strcmp() to find by filename
+
+  10. Implement sll_remove()
+      → Handle head removal separately
+      → Fix next pointer of previous node
+
+  11. Implement sll_free()
+      → Free data buffer first, then node
+
+  CHECKPOINT TEST (write in main.c temporarily):
+    FileNode* head = NULL;
+    sll_append(&head, create_file_node("test_files/file1.txt"));
+    sll_append(&head, create_file_node("test_files/file2.txt"));
+    → Print both filenames and sizes
+    → Sizes must match actual file sizes ✅
+
+--------------------------------------------------------------------------------
+PHASE 3 — DOUBLY LINKED LIST  (Day 3)
+--------------------------------------------------------------------------------
+
+  GOAL: Build and display the archive index.
+
+  12. Implement create_index_node()
+
+  13. Implement dll_append()
+      → Set both prev AND next pointers correctly
+      → Common bug: forgetting to set prev of new node
+
+  14. Implement dll_find()
+
+  15. Implement dll_remove()
+      → 4 cases: remove head / remove tail /
+                 remove middle / only one node
+
+  16. Implement dll_print()
+      → Format the table neatly
+      → Calculate compression ratio: 
+         ratio = (1 - comp/orig) * 100
+
+  17. Implement dll_free()
+
+  CHECKPOINT TEST:
+    IndexNode* head = NULL;
+    dll_append(&head, create_index_node("file1.txt", 5000, 3200, 1, 0));
+    dll_append(&head, create_index_node("file2.txt", 3000, 3000, 0, 5200));
+    dll_print(head);
+    → Beautiful table prints correctly ✅
+    Traverse FORWARD and BACKWARD manually ✅
+
+--------------------------------------------------------------------------------
+PHASE 4 — RLE COMPRESSION  (Day 4-5)
+--------------------------------------------------------------------------------
+
+  GOAL: Compress and decompress data correctly.
+
+  18. Implement rle_compress()
+      → Scan byte by byte
+      → Count consecutive identical bytes
+      → If count > 1: write '#', count, byte
+      → If count = 1: write byte only
+      → malloc() output buffer (worst case: 3x input size)
+
+  19. Implement rle_decompress()
+      → If byte == '#': read count, read byte, repeat
+      → Otherwise: copy byte directly
+
+  20. Implement should_compress()
+      → Simple size comparison
+
+  CHECKPOINT TEST — CRITICAL:
+    unsigned char* input = "aaabbbccddddde";
+    long comp_size;
+    unsigned char* compressed = rle_compress(input, 14, &comp_size);
+
+    long orig_size;
+    unsigned char* restored = rle_decompress(compressed, comp_size, &orig_size);
+
+    → strcmp(input, restored) == 0  MUST PASS ✅
+    → Test with "abcd" too → should_compress() returns 0 ✅
+
+--------------------------------------------------------------------------------
+PHASE 5 — ENCRYPTION  (Day 6)
+--------------------------------------------------------------------------------
+
+  GOAL: Encrypt and decrypt data correctly using bitwise ops.
+
+  21. Implement hash_password()
+      → djb2 algorithm (same as Mini Search Engine!)
+
+  22. Implement validate_password()
+      → Use isdigit() and isupper() from <ctype.h>
+
+  23. Implement encrypt_data()
+      → XOR then rotate left
+      → Work byte by byte, modify in-place
+
+  24. Implement decrypt_data()
+      → Rotate right then XOR
+      → Must be EXACT reverse of encrypt
+
+  CHECKPOINT TEST — CRITICAL:
+    char data[] = "Hello World this is a test";
+    int len = strlen(data);
+    char original_copy[100];
+    strcpy(original_copy, data);
+
+    encrypt_data(data, len, "Abc123");
+    → data should look like gibberish now
+
+    decrypt_data(data, len, "Abc123");
+    → strcmp(data, original_copy) == 0  MUST PASS ✅
+
+    decrypt_data(data, len, "WrongPass");
+    → Result should NOT match original ✅
+
+--------------------------------------------------------------------------------
+PHASE 6 — CHECKSUM  (Day 7)
+--------------------------------------------------------------------------------
+
+  GOAL: Detect corrupted archives.
+
+  25. Implement compute_checksum()
+      → XOR chain with rotation
+
+  26. Implement verify_checksum()
+      → Simple comparison
+
+  CHECKPOINT TEST:
+    unsigned char data[] = "Hello World";
+    unsigned int cs = compute_checksum(data, 11);
+
+    → verify_checksum(data, 11, cs) == 1  ✅
+
+    data[3] = 'X';   // corrupt one byte
+    → verify_checksum(data, 11, cs) == 0  ✅
+
+--------------------------------------------------------------------------------
+PHASE 7 — ADD AND EXTRACT  (Day 8-9)
+--------------------------------------------------------------------------------
+
+  GOAL: Core archive creation and extraction working end-to-end.
+
+  27. Implement add_files()
+      → Tie together: SLL + RLE + Encrypt + Checksum + File Write
+      → Write ArchiveHeader first
+      → Then write each file entry
+      → Print summary at end
+
+  28. Implement extract_files()
+      → Read header → verify password hash → verify checksum
+      → Decrypt → Decompress → Write to output folder
+      → Handle specific_file parameter
+
+  CHECKPOINT TEST — MOST IMPORTANT:
+    $ ./crptzip add archive.crptz Abc123 file1.txt file2.txt
+    → archive.crptz created ✅
+    → Open in vim → pure gibberish 🔐 ✅
+
+    $ ./crptzip extract archive.crptz Abc123 output/
+    → files restored ✅
+
+    $ diff file1.txt output/file1.txt
+    → NO OUTPUT (files are identical) ✅
+
+    $ ./crptzip extract archive.crptz wrongpass output/
+    → "Wrong password ❌" ✅
+
+--------------------------------------------------------------------------------
+PHASE 8 — LIST, DELETE, INSPECT  (Day 10)
+--------------------------------------------------------------------------------
+
+  29. Implement list_archive()
+      → Read headers only (no password needed)
+      → Build DLL, call dll_print()
+
+  30. Implement delete_file()
+      → Read entire archive
+      → Remove target file
+      → Rewrite archive without it
+
+  31. Implement inspect_archive()
+      → Calculate and print all statistics
+
+  CHECKPOINT:
+    $ ./crptzip list    archive.crptz  → table ✅
+    $ ./crptzip delete  archive.crptz Abc123 file2.txt
+    $ ./crptzip list    archive.crptz  → one less file ✅
+    $ ./crptzip inspect archive.crptz  → correct stats ✅
+
+--------------------------------------------------------------------------------
+PHASE 9 — MAIN.C  (Day 11)
+--------------------------------------------------------------------------------
+
+  32. Implement main()
+      → Parse argv[1] for command name
+      → Call correct function
+      → Print usage message on wrong input
+
+  CHECKPOINT:
+    All 5 commands work from terminal ✅
+    Wrong command → usage message ✅
+
+--------------------------------------------------------------------------------
+PHASE 10 — POLISH + DEMO PREP  (Day 12 = April 21)
+--------------------------------------------------------------------------------
+
+  33. Run valgrind:
+      valgrind ./crptzip add archive.crptz Abc123 file1.txt
+      → Fix ALL memory leaks
+
+  34. Test ALL edge cases:
+      → Empty file
+      → File with one repeated character
+      → Very large file (>10,000 bytes)
+      → Archive with only 1 file
+      → Wrong password
+      → Corrupt archive
+
+  35. Clean up code:
+      → Add a comment above every function
+      → Remove all debug printf statements
+      → Make sure indentation is consistent
+
+  36. Practice demo script (Section 10) out loud
+      → Time yourself — should be under 5 minutes
+      → Prepare answers for "explain this function"
+
+================================================================================
+                 SUMMARY TIMELINE
+================================================================================
+
+  Day 1   (April 11) →  Setup + structs + Makefile
+  Day 2   (April 12) →  SLL (Sections A)
+  Day 3   (April 13) →  DLL (Section B)
+  Day 4-5 (April 14) →  RLE compression (Section C)
+  Day 6   (April 15) →  Encryption (Section D)
+  Day 7   (April 16) →  Checksum (Section E)
+  Day 8-9 (April 17) →  add_files + extract_files (Section F1, F2)
+  Day 10  (April 18) →  list + delete + inspect (Section F3-F5)
+  Day 11  (April 19) →  main.c (Section G)
+  Day 12  (April 20) →  Polish + edge cases + valgrind
+  Day 13  (April 21) →  Full demo practice
+  Day 14  (April 22) →  DEMO DAY 🚀
+
+================================================================================
+                   GOLDEN RULES
+================================================================================
+
+  1. NEVER move to the next phase until the current phase
+     passes its checkpoint test completely.
+     A broken foundation breaks everything above it.
+
+  2. Test EVERY function individually before combining them.
+
+  3. Compile after EVERY function you write.
+     Never accumulate 10 functions and compile once.
+
+  4. If you are stuck for more than 30 minutes → ask for help.
+     Do not waste hours on one bug alone.
+
+  5. Do NOT procrastinate. You have 11 days.
+     Miss one day → you lose a phase.
+     Miss two days → demo is at risk.
+
+================================================================================
+                    GOOD LUCK — YOU GOT THIS! 🔐🚀
+================================================================================
