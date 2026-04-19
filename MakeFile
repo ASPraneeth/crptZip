@@ -1,10 +1,16 @@
-Target=crptz
+Target = crptz
+CFLAGS = -g
 
-all: ${Target}
+all: $(Target)
 
-${Target}: main.o crptzip.o
-	gcc $^ -o $@
-%.o: %.c
-	gcc -c $^
+$(Target): main.o crptzip.o
+	gcc $(CFLAGS) $^ -o $@
+
+main.o: main.c crptzip.h
+	gcc $(CFLAGS) -c main.c
+
+crptzip.o: crptzip.c crptzip.h
+	gcc $(CFLAGS) -c crptzip.c
+
 clean:
-	rm main.o crptzip.o ${Target}
+	rm -f *.o $(Target)
