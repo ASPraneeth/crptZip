@@ -27,8 +27,9 @@ typedef struct ArchiveHeader
 	unsigned int hashpassword;
 }archiveheader;
 
-int Encrypt_files(const char* archive_path, const char* password, char** files,int num_files);
-int Extract_files(const char* archive_path, const char* password, const char* output_folder);
-int Extract_one_file(const char* archive_path,const char* password, const char* output_folder,char* filename);
-void list_files(const char* archive_file);
-void Inspect_files(const char* archive_file);
+int Encrypt_files(const char*, const char*, char** ,int );
+int Extract_files(const char*, const char* , const char*);
+int Extract_one_file(const char*,const char*, const char*,char*);
+void list_files(const char*);
+void Inspect_files(const char*);
+void Remove_file(const char*,const char*,const char*);

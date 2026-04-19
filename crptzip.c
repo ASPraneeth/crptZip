@@ -5,6 +5,12 @@
 
 filenode* create_file_node(const char* filename)
 {
+	FILE *fp=fopen(filename,"rb");
+	if(fp==NULL)
+	{
+		printf("Error opening the file %s\n",filename);
+		return NULL;
+	}
 	//**Create New Node
 	filenode *new=malloc(sizeof(filenode));
 	new->next=NULL;
@@ -12,17 +18,11 @@ filenode* create_file_node(const char* filename)
 	strcpy(new->filename,filename);
 	new->length=strlen(filename);
 	//**Copy data into filenode
-	FILE *fp=fopen(filename,"rb");
-	if(fp==NULL)
-	{
-		printf("Error opening the file %s\n",filename);
-		exit(0);
-	}
-	fseek(fp,0,SEEK_END); //**To get the size of data
+	fseek(fp,0,SEEK_END)!=0; //--------** To get the size of data
 	new->original_size=ftell(fp);
-	fseek(fp,0,SEEK_SET);
+	fseek(fp,0,SEEK_SET)!=0;
 	new->data =(unsigned char *) malloc(new->original_size);
-	fread(new->data,1,new->original_size,fp);
+	fread(new->data,1,new->original_size,fp);//-------* Read data
 	fclose(fp);
 	return new;
 }
@@ -59,33 +59,6 @@ filenode* find_file(filenode *head, const char* filename)
 		temp=temp->next;
 	}
 	return NULL;
-}
-
-int remove_file(filenode** head, const char* filename)
-{
-	filenode* temp=*head;
-	if(temp==NULL)
-		return 0;
-	if(strcmp(temp->filename,filename)==0)
-	{
-		*head=temp->next;
-		free(temp->data);
-		free(temp);
-		return 1;
-	}
-	while(temp->next!=NULL)
-	{
-		if(strcmp(temp->next->filename, filename)==0)
-		{
-			filenode * flag=temp->next;
-			temp->next=flag->next;
-			free(flag->data);
-			free(flag);
-			return 1;
-		}
-		temp=temp->next;
-	}
-	return 0;
 }
 
 void free_filenode(filenode * head)
@@ -148,60 +121,40 @@ indexnode* find_index(indexnode* head, const char* filename)
 	return NULL;
 }
 
-int remove_index(indexnode** head, const char * filename)
-{
-	indexnode *temp=*head;
-	if(strcmp(temp->filename, filename)==0)
-	{
-		*head=temp->next;
-		temp->next->prev=NULL;
-		free(temp);
-		return 1;
-	}
-	while(temp->next!=NULL)
-	{
-		if(strcmp(temp->next->filename,filename)==0)
-		{
-			indexnode* flag=temp->next;
-			temp->next=flag->next;
-			flag->next->prev=temp;
-			free(flag);
-			return 1;
-		}
-		temp=temp->next;
-	}
-	return 0;
-}
-
 void index_print(indexnode* head)
 {
 	indexnode* temp=head;
 	int nofiles=0;
 	long orgsize=0;
 	long storedsize=0;
-	int length=strlen(temp->filename);
-	printf("%-40sOrig Size\tStored Size\tRatio\t\tCompress\n","Filename");
+	printf("   %-40sOrig Size\t       Stored Size         Ratio\tCompress\n","Filename");
+	int i=0;
 	while(temp!=NULL)
 	{
 		float ratio;
+
 		if(temp->original_size > 0)
 			ratio=((temp->original_size  - temp->compressed_size )*1.0)/temp->original_size;
 		else 
 			ratio=0;
+
 		ratio*=100;
 		char flag[5];
 		if(temp->is_compressed==1)
 			strcpy(flag,"Yes");
 		else 
 			strcpy(flag,"No");
-		printf("%-40s%dbytes\t%dbytes\t%.2f\%% saved\t%s\n",temp->filename,temp->original_size,temp->compressed_size,ratio,flag);
+		printf("%-2d %-40s%-12ldbytes   %-12ldbytes   %.2f\%% saved\t%s\n",i+1,temp->filename,temp->original_size,temp->compressed_size,ratio,flag);
 		nofiles++;
 		orgsize+=temp->original_size;
 		storedsize+=temp->compressed_size;
 		temp=temp->next;
+		i++;
 	}
 	printf("----------------------------------------------------------------------\n");
-	printf("Total: %d file(s) | %d bytes original | %d bytes stored\n",nofiles,orgsize,storedsize);
+	printf("Total: %d file(s) | %ld bytes original | %ld bytes stored\n",nofiles,orgsize,storedsize);
+	printf("----------------------------------------------------------------------\n");
+
 	return;
 }
 
@@ -217,13 +170,13 @@ void free_indexnode(indexnode* head)
 	return;
 }
 
-unsigned char* compress_data(const unsigned char* data, long original_size, long* compressed_size)
+unsigned char* compress_data(unsigned char* data, long original_size, long* compressed_size)
 {
-	//aaaa is compressed to 4a  abcd is compressed into 1a1b1c1d
-	unsigned char* out=malloc(2*(original_size)); //changed from stack to malloc
+	//***Example : aaaa is compressed to 4a  abcd is compressed into 1a1b1c1d
+	unsigned char* out=malloc(2*(original_size));
 	long size=0;
 	long count=1;
-	char prev;
+	unsigned char prev;
 	for(long i=0;i<original_size;i++)
 	{
 		if(i==0)
@@ -348,55 +301,19 @@ int verify_checksum(const unsigned char* data, long size, unsigned int expected)
 		return 0;
 }
 
-int Encrypt_files(const char* archive_file, const char* password, char** files,int num_files)
+indexnode* write_into_archive(const char* archive_file,filenode* file_header,archiveheader header)
 {
-	//***Checking whether the password is valid or not
-	if(validate_password(password)==0)
+	FILE *fp=fopen(archive_file,"wb");
+	if(fp==NULL)
 	{
-		printf("Password Must contain atleast 6 characters, 1 capital letter and one digit\n");
+		printf("Error opening file %s\n",archive_file);
+		free_filenode(file_header);
 		exit(1);
 	}
-
-	//***Header to store the metadata about the archieve.crptz file
-	archiveheader header;
-	header.num_files=num_files;
-	strcpy(header.file_type,"CRPTZ\0");
-	header.hashpassword=hash_password(password);
-	unsigned int checksum=0;
-	
-	//***Extract the file content into filenodes
-	filenode *file_header=NULL; //header to store all file data
-	for(int i=0;i<num_files;i++)
-	{
-		//***copying, compressing and encrypting of files
-		filenode * file=create_file_node(files[i]);
-		long size=file->original_size;
-		unsigned char* cdata=compress_data(file->data,file->original_size,&(file->compressed_size));
-		if(file->original_size > file->compressed_size)
-		{
-			file->is_compressed=1;
-			free(file->data);
-			file->data=cdata;
-			size=file->compressed_size;
-		}
-		else
-			free(cdata);
-		file->compressed_size=size;
-		encrpt_data(file->data,size,password);
-		append_file(&file_header,file);
-		checksum+=compute_checksum(file->data,size);
-	}
-	header.checksum=checksum;
-
-	// writing the details of the archive into a newfile
-	
-	FILE *fp=fopen(archive_file,"wb");
 	fwrite(&header,sizeof(archiveheader),1,fp);
-	
-	// writing encrypted file to archive_file
 	filenode *temp=file_header;
 	indexnode* index_header=NULL;
-	for(int i=0;i<num_files;i++)
+	for(int i=0;temp!=NULL;i++)
 	{
 		fwrite(&(temp->length),sizeof(int),1,fp);
 		fwrite(temp->filename,1,temp->length,fp);
@@ -404,7 +321,7 @@ int Encrypt_files(const char* archive_file, const char* password, char** files,i
 		fwrite(&(temp->compressed_size),sizeof(long),1,fp);
 		fwrite(&(temp->is_compressed),sizeof(int),1,fp);
 		long offset=ftell(fp);
-		offset+=sizeof(long);//****check this ****
+		offset+=sizeof(long);
 		fwrite(&(offset),sizeof(long),1,fp);
 		fwrite(temp->data,1,temp->compressed_size,fp);
 
@@ -414,8 +331,70 @@ int Encrypt_files(const char* archive_file, const char* password, char** files,i
 		temp=temp->next;
 	}
 	fclose(fp);
+	return index_header;
+}
 
-	//***Print Summary
+int Encrypt_files(const char* archive_file, const char* password, char** files,int num_files)
+{
+	//---Checking whether the password is valid or not
+	if(validate_password(password)==0)
+	{
+		printf("Password Must contain atleast 6 characters, 1 capital letter and one digit\n");
+		exit(1);
+	}
+
+	//---Header to store the metadata about the crptz file
+	archiveheader header;
+	header.num_files=num_files;
+	strcpy(header.file_type,"CRPTZ\0");
+	header.hashpassword=hash_password(password);
+	unsigned int checksum=0;
+	int extrafiles=0;	
+	//---Extract the file content into filenodes
+	filenode *file_header=NULL; 
+	for(int i=0;i<num_files;i++)
+	{
+		//---Copying, Compressing and Encryption of files
+		if(find_file(file_header,files[i])!=NULL)
+		{
+			extrafiles++;
+			continue;  //---skips repeated files
+		}
+		filenode * file=create_file_node(files[i]);
+		if(file==NULL)
+		{
+			free_filenode(file_header);
+			exit(1);
+		}
+		long size=file->original_size;
+		if(file->original_size > 0)
+		{
+			unsigned char* cdata=compress_data(file->data,file->original_size,&(file->compressed_size));
+			if(file->original_size > file->compressed_size)
+			{
+				file->is_compressed=1;
+				free(file->data);
+				file->data=cdata;
+				size=file->compressed_size;
+			}
+			else
+			{
+				free(cdata);
+			}
+		}
+		file->compressed_size=size;
+		encrpt_data(file->data,size,password);
+		append_file(&file_header,file);
+		checksum+=compute_checksum(file->data,size);
+	}
+	header.num_files-=extrafiles;
+	num_files-=extrafiles;
+	header.checksum=checksum;
+
+	//---Writing header and files into archive_header
+	indexnode* index_header=write_into_archive(archive_file,file_header,header);
+
+	//---Print Summary
 	printf("----------------------------------\n");
 	printf("Added %d files to %s\n",num_files,archive_file);
 	printf("----------------------------------\n");
@@ -427,18 +406,18 @@ int Encrypt_files(const char* archive_file, const char* password, char** files,i
 		total1+=temp2->original_size;
 		total2+=temp2->compressed_size;
 
-		printf(" %s : %d bytes -> %d bytes",temp2->filename,temp2->original_size,temp2->compressed_size);
+		printf("%-2d %-40s : %ld bytes  ->  %ld bytes",i+1,temp2->filename,temp2->original_size,temp2->compressed_size);
 		if(temp2->is_compressed==1)
-			printf(" -- compressed)\n");
+			printf(" -- compressed\n");
 		else
-			printf(" -not compressed\n");
+			printf(" --not compressed\n");
 		temp2=temp2->next;
 	}
 	printf("----------------------------------------\n");
-	printf("Total\t: %d bytes -> %d bytes\n",total1,total2);
+	printf("Total\t: %ld bytes -> %ld bytes\n",total1,total2);
 	printf("----------------------------------------\n");
-	//***Free file_header & index_header
-	
+
+	//---Free file_header & index_header
 	free_filenode(file_header);
 	free_indexnode(index_header);
 	return 1;
@@ -446,17 +425,23 @@ int Encrypt_files(const char* archive_file, const char* password, char** files,i
 
 archiveheader extract_details(const char* archive_file,indexnode** index_out_header)
 {
-	//***First get details in header
+	//---First get details in header
 	archiveheader header;
 	FILE *fp=fopen(archive_file,"rb");
+	if(fp==NULL)
+	{
+		printf("Error Opening the file %s\n",archive_file);
+		exit(1);
+	}
 	fread(&header,sizeof(archiveheader),1,fp);
 	unsigned int checksum=0;
 	if(strcmp(header.file_type,"CRPTZ")!=0)
 	{
-		printf("Only CRTPZ files are supported\n");
+		printf("Only CRPTZ files are supported\n");
+		fclose(fp);
 		exit(1);
 	}
-	//***Store index information in indexnode
+	//---Store index information in indexnode
 	indexnode* index_header=NULL;
 	for(int i=0;i<header.num_files;i++)
 	{
@@ -467,6 +452,13 @@ archiveheader extract_details(const char* archive_file,indexnode** index_out_hea
 		int is_compressed;
 		long offset;
 		fread(&length,sizeof(int),1,fp);
+		if(length>255)
+		{
+			printf("File Currupted\n");
+			free_indexnode(index_header);
+			fclose(fp);
+			exit(1);
+		}
 		fread(filename,1,length,fp);
 		filename[length]='\0';
 		fread(&original_size,sizeof(long),1,fp);
@@ -482,7 +474,9 @@ archiveheader extract_details(const char* archive_file,indexnode** index_out_hea
 	}
 	if(checksum!=header.checksum)
 	{
-		printf("Data currupted\n");
+		printf("Checksum mismatch - Archive corrupted\n");
+		fclose(fp);
+		free_indexnode(index_header);
 		exit(1);
 	}
 	*index_out_header=index_header;
@@ -492,21 +486,22 @@ archiveheader extract_details(const char* archive_file,indexnode** index_out_hea
 
 int Extract_files(const char* archive_file, const char* password, const char* output_folder)
 {
-	indexnode *index_header;
+	indexnode *index_header=NULL;
 	archiveheader header=extract_details(archive_file,&index_header);
 	unsigned int hash=hash_password(password);
 	if(hash!=header.hashpassword)
 	{
 		printf("Wrong Password\n");
+		free_indexnode(index_header);
 		exit(1);
 	}
 	FILE *fp=fopen(archive_file,"rb");
 
-	//***Decrypt and Regenerate files from archive_file
+	//---Decrypt and Regenerate files from archive_file
 	indexnode* temp=index_header;
 	for(int i=0;i<header.num_files;i++)
 	{
-		fseek(fp,temp->offset,SEEK_SET);
+		fseek(fp,temp->offset,SEEK_SET)!=0;
 		unsigned char *data=malloc(temp->compressed_size);
 		fread(data,1,temp->compressed_size,fp);
 		decrpt_data(data,temp->compressed_size,password);
@@ -516,10 +511,12 @@ int Extract_files(const char* archive_file, const char* password, const char* ou
 			orig_data=decompress_data(data,temp->compressed_size,temp->original_size);
 			free(data);
 		}
-		//***Write data into files
-		char out[300];
+		//---Write data into files
+		char out[520];
 		strcpy(out,output_folder);
-		char * token=strtok(temp->filename,"/");
+		char filename[256];
+		strcpy(filename,temp->filename);
+		char * token=strtok(filename,"/");
 		char* name;
 		while(token!=NULL)
 		{
@@ -530,7 +527,9 @@ int Extract_files(const char* archive_file, const char* password, const char* ou
 		FILE *file=fopen(out,"wb");
 		if(file==NULL)
 		{
-			printf("Failed Opening File %s\n",out);
+			printf("Folder %s not found\n",output_folder);
+			fclose(fp);
+			free_indexnode(index_header);
 			exit(1);
 		}
 		fwrite(orig_data,1,temp->original_size,file);
@@ -538,11 +537,10 @@ int Extract_files(const char* archive_file, const char* password, const char* ou
 		fclose(file);
 		temp=temp->next;
 	}
-	//Print Summary
+	//---Print Summary
 	list_files(archive_file);
-	printf("--------------------------------------\n");
 	fclose(fp);
-	//***Free indexnodes
+	//---Free indexnodes
 	free_indexnode(index_header);
 	return 1;
 }
@@ -555,6 +553,7 @@ int Extract_one_file(const char* archive_file,const char* password,const char* o
 	if(hash!=header.hashpassword)
 	{
 		printf("Wrong Password\n");
+		free_indexnode(index_header);
 		exit(1);
 	}
 	indexnode* temp=index_header;
@@ -564,7 +563,13 @@ int Extract_one_file(const char* archive_file,const char* password,const char* o
 		{
 
 			FILE *fp=fopen(archive_file,"rb");
-			fseek(fp,temp->offset,SEEK_SET);
+			if(fp==NULL)
+			{
+				free_indexnode(index_header);
+				printf("Error Opening File %s\n",archive_file);
+				exit(1);
+			}
+			fseek(fp,temp->offset,SEEK_SET)!=0;
 			unsigned char* data=malloc(temp->compressed_size);
 			fread(data,1,temp->compressed_size,fp);
 			decrpt_data(data,temp->compressed_size,password);
@@ -574,7 +579,7 @@ int Extract_one_file(const char* archive_file,const char* password,const char* o
 				original_data=decompress_data(data,temp->compressed_size,temp->original_size);
 				free(data);
 			}
-			char out[300];
+			char out[520];
 			strcpy(out,output_folder);
 			char* file;
 			char* token=strtok(filename,"/");
@@ -588,61 +593,139 @@ int Extract_one_file(const char* archive_file,const char* password,const char* o
 			FILE *fp2=fopen(out,"wb");
 			if(fp2==NULL)
 			{
-				printf("Error opening file %s\n",out);
+				printf("Folder %s not found\n",output_folder);
+				fclose(fp);
+				free_indexnode(index_header);
 				exit(1);
 			}
 			fwrite(original_data,1,temp->original_size,fp2);
 			free(original_data);
 			fclose(fp);
 			fclose(fp2);
-			//***Print Summary
+			//---Print Summary
 			printf("--------------------------------------\n");
 			printf("File: %s\t|\t%d file(s)\n",archive_file,header.num_files);
 			printf("--------------------------------------\n");
 			printf("%d.  %s \n",1,temp->filename);
 			printf("--------------------------------------\n");
-			//***Free indexnode
+			//---Free indexnode
 			free_indexnode(index_header);
 			return 1;
 		}
 		temp=temp->next;
 	}
-	printf("%s file not found in %s\n",filename,archive_file);
-	return 1;
-	//***Free indexnode
+	printf("File not found in %s\n",archive_file);
+	//---Free indexnode
 	free_indexnode(index_header);
+	return 0;
 }
 
 void list_files(const char* archive_file)
 {
-	indexnode* index_header;
+	indexnode* index_header=NULL;
 	archiveheader header=extract_details(archive_file,&index_header);
-	//printf("%s\n",archive_file);
 	printf("--------------------------------------\n");
 	printf("File: %s\t|\t%d file(s)\n",archive_file,header.num_files);
 	printf("--------------------------------------\n");
-	//print filenames
 	indexnode* temp=index_header;
 	int i=1;
 	while(temp!=NULL)
 	{
-		printf("%d.  %s \n",i,temp->filename);
+		printf("%-2d  %-40s \n",i,temp->filename);
 		i++;
 		temp=temp->next;
 	}
-	//***Free indexnode
+	printf("--------------------------------------\n");
+	//---Free indexnode
 	free_indexnode(index_header);
 	return;
 }
 
 void Inspect_files(const char* archive_file)
 {
-	indexnode* index_header;
+	indexnode* index_header=NULL;
 	archiveheader header=extract_details(archive_file,&index_header);
 	printf("-----------------------------------\n");
-	printf("File: %s\t%d file(s)\n",archive_file,header.num_files);
+	printf("File: %s\t|\t%d file(s)\n",archive_file,header.num_files);
 	printf("-----------------------------------\n");
 	index_print(index_header);
-	//***Free indexnode
+	//---Free indexnode
 	free_indexnode(index_header);
+}
+
+void Remove_file(const char* archive_file, const char* password, const char* filename)
+{
+	indexnode* index_header=NULL;
+	archiveheader header=extract_details(archive_file,&index_header);
+	unsigned int hash=hash_password(password);
+	if(hash!=header.hashpassword)
+	{
+		printf("Wrong Password\n");
+		exit(1);
+	}
+	//---Check whether the file is present in archvive_header or not
+	if(find_index(index_header,filename)==NULL)
+	{
+		free_indexnode(index_header);
+		printf("File not found in %s\n",archive_file);
+		return;
+	}
+	filenode* files_header=NULL;
+	indexnode* temp=index_header;
+	unsigned int checksum;
+	while(temp!=NULL)
+	{
+		filenode* file=malloc(sizeof(filenode));
+		strcpy(file->filename,temp->filename);
+		file->length=strlen(temp->filename);
+		file->original_size=temp->original_size;
+		file->compressed_size=temp->compressed_size;
+		file->is_compressed=temp->is_compressed;
+		file->next=NULL;
+		FILE *fp=fopen(archive_file,"rb");
+		if(fp==NULL)
+		{
+			printf("Error Opening File %s\n",archive_file);
+			free_indexnode(index_header);
+			free_filenode(files_header);
+			exit(1);
+		}
+		fseek(fp,temp->offset,SEEK_SET);
+		file->data=(unsigned char*)malloc(file->compressed_size);
+		fread(file->data,1,file->compressed_size,fp);
+		if(strcmp(file->filename,filename)==0)
+		{
+			checksum=compute_checksum(file->data,file->compressed_size);
+			free(file->data);
+			free(file);
+			fclose(fp);
+			temp=temp->next;
+			continue;
+		}
+		fclose(fp);
+		append_file(&files_header,file);
+		temp=temp->next;
+	}
+
+	//---update archiveheader
+	header.num_files--;
+	header.checksum-=checksum;
+
+	//---write new content to archive_file
+	indexnode* flag=write_into_archive(archive_file,files_header,header);
+	free_indexnode(flag);
+	//---Summary
+	indexnode *node=find_index(index_header,filename);
+	printf("------------------------------------------------\n");
+	printf("   %-40sOrig Size\t       Stored Size\n","Filename");
+	printf("------------------------------------------------\n");
+	printf("%-2d %-40s%-12ldbytes   %-12ldbytes\n",1,node->filename,node->original_size,node->compressed_size);
+	printf("------------------------------------------------\n");
+	printf("File Removed\n");
+	printf("------------------------------------------------\n");
+	
+	//---Free memory
+	free_indexnode(index_header);
+	free_filenode(files_header);
+	return ;
 }
